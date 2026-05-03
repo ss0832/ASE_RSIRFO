@@ -25,15 +25,29 @@ Three independent things can happen to the Hessian during optimisation:
    Identity (default), Fischer-D3 model, Swart-D2 model, or a user-supplied
    ``np.ndarray`` in eV/Angstrom^2.
 
+   For transition-state searches the recommended practice is to pass an exact
+   numerical Hessian computed with :func:`numerical_hessian_from_forces`::
+
+       H0 = numerical_hessian_from_forces(atoms, delta=0.01)
+       opt = RSIRFO(atoms, order=1, hessian=H0,
+                    hessian_recompute_interval=5,
+                    hessian_recompute_method="numerical")
+
+   **Step 0 is never recomputed automatically** — the recompute schedule
+   (item 3 below) fires only at ``iteration > 0``.  Therefore the only way
+   to start from the exact numerical Hessian is to pass it explicitly via
+   ``hessian=``.
+
 2. **Quasi-Newton update** (``hessian_update=...``)
    Applied at every step using the latest ``(s, y)`` pair (and possibly a
    short history for block updates).
 
 3. **Periodic recomputation** (``hessian_recompute_interval=N``)
-   Every ``N`` accepted steps the running Hessian is **discarded** and
-   replaced by a freshly computed one. The replacement uses one of:
+   Every ``N`` accepted steps (``iteration > 0`` only) the running Hessian
+   is **discarded** and replaced by a freshly computed one.  The replacement
+   uses one of:
 
-   * ``"model"``    -- rebuild the same model Hessian (fischer / swart) at
+   * ``"model"``     -- rebuild the same model Hessian (fischer / swart) at
      the current geometry. Cheap and keeps the chemistry right; only valid
      when the initial Hessian was a model.
    * ``"numerical"`` -- central-difference Hessian from the calculator's
@@ -45,6 +59,16 @@ Three independent things can happen to the Hessian during optimisation:
    When ``hessian_recompute_method`` is ``None`` (default), the choice is
    inferred from the initial Hessian: ``"model"`` for ``fischer``/``swart``,
    ``"callback"`` if a callback is provided, otherwise ``"numerical"``.
+
+   The auto-default for ``hessian_recompute_interval`` depends on the type
+   of the initial Hessian:
+
+   * ``"fischer"`` / ``"swart"`` / callback provided → ``50`` (minimisation)
+     or ``5`` (saddle search, ``order >= 1``).
+   * ``"identity"`` / user ``ndarray`` → ``0`` (off).
+
+   When passing a pre-computed ``ndarray`` as the initial Hessian, set
+   ``hessian_recompute_interval`` explicitly; the auto-default is 0 (off).
 
 Algorithm summary
 -----------------
@@ -125,6 +149,20 @@ def numerical_hessian_from_forces(
     ``ase.vibrations.Vibrations``: H_ij = -(F_i(x_j+delta) - F_i(x_j-delta))
     / (2 * delta). Restores ``atoms.positions`` on exit.
 
+    This is the recommended way to obtain the initial Hessian for a
+    transition-state search.  Because :meth:`RSIRFO._maybe_recompute` always
+    skips step 0, the periodic recompute schedule alone cannot supply the
+    exact Hessian at the very first step; you must pass the result of this
+    function explicitly as the ``hessian=`` argument::
+
+        H0 = numerical_hessian_from_forces(atoms, delta=0.01)
+        opt = RSIRFO(atoms, order=1, hessian=H0,
+                     hessian_recompute_interval=5,
+                     hessian_recompute_method="numerical")
+
+    The cost is 6*N* single-point force evaluations (symmetric finite
+    differences over all 3*N* Cartesian degrees of freedom).
+
     Parameters
     ----------
     atoms
@@ -196,6 +234,15 @@ class RSIRFO(Optimizer):
         Initial Hessian: ``'identity'`` (default), ``'fischer'``,
         ``'swart'``, or a user-supplied ``(3N, 3N)`` ``np.ndarray`` in
         eV/Angstrom^2.
+
+        For transition-state searches, pass the result of
+        :func:`numerical_hessian_from_forces` here to start from the exact
+        numerical Hessian at step 0.  The periodic recompute schedule
+        (``hessian_recompute_interval``) always skips step 0, so this is
+        the only way to ensure the exact curvature is used from the very
+        first step.  Remember to also set ``hessian_recompute_interval``
+        explicitly, because the auto-default is 0 (off) for ``ndarray``
+        inputs.
     fischer_functional
         D3 functional preset for the Fischer-D3 model Hessian
         (default ``'pbe0'``).
@@ -209,16 +256,21 @@ class RSIRFO(Optimizer):
         Block (multi-secant) update parameters - see
         :class:`HessianUpdater`.
     hessian_recompute_interval
-        Refresh the Hessian from scratch every ``N`` accepted steps. Default
-        depends on the initial Hessian:
+        Refresh the Hessian from scratch every ``N`` accepted steps.
+        **Step 0 is always skipped** — the initial Hessian is always the
+        value passed to ``hessian=``, regardless of this setting.
+        Recomputation fires at iterations 1, 2, … when
+        ``iteration % N == 0``.
 
-        * ``hessian='identity'`` or user-supplied ``ndarray`` -> ``0`` (off);
-          the Hessian is only quasi-Newton updated.
-        * ``hessian='fischer'`` / ``'swart'`` or ``hessian_callback`` set ->
-          ``50`` (minimisation) or ``5`` (saddle search).
+        Default depends on the initial Hessian:
 
-        Pass ``0`` explicitly to disable refresh, or any positive integer to
-        override the default.
+        * ``hessian='identity'`` or user-supplied ``ndarray`` → ``0``
+          (off); set this explicitly when passing a pre-computed Hessian
+          and periodic refresh is wanted.
+        * ``hessian='fischer'`` / ``'swart'`` or ``hessian_callback``
+          set → ``50`` (minimisation) or ``5`` (saddle search).
+
+        Pass ``0`` explicitly to disable refresh entirely.
     hessian_recompute_method
         ``"model"``, ``"numerical"``, ``"callback"``, or ``None`` (auto -
         infer from the initial Hessian / callback presence).
@@ -395,15 +447,19 @@ class RSIRFO(Optimizer):
         self._swart_kwargs = dict(swart_kwargs or {})
 
         # --- Hessian recomputation policy ---------------------------------
-        # Empirically-good defaults (multioptpy convention):
-        #   identity / user-ndarray   -> OFF (re-evaluating the identity is
-        #                                meaningless, and the user who passes
-        #                                a custom matrix likely wants it kept)
-        #   model ('fischer'/'swart') -> 50 steps for minima,
-        #                                 5 steps for saddle searches
-        # When a callback is provided, the user clearly *wants* a refreshed
-        # Hessian so we use the order-dependent interval too.
-        # Pass ``hessian_recompute_interval=0`` to disable refresh entirely.
+        # Step 0 is always skipped by _maybe_recompute (see below).  The
+        # initial Hessian is therefore always whatever is passed via hessian=.
+        # To start a TS search from the exact numerical Hessian, call
+        # numerical_hessian_from_forces() before constructing RSIRFO and pass
+        # the result as hessian=.  Then set hessian_recompute_interval
+        # explicitly, because the auto-default for ndarray inputs is 0 (off).
+        #
+        # Auto-defaults:
+        #   identity / user-ndarray   -> 0 (off)
+        #   model ('fischer'/'swart') -> 50 (minimisation) or 5 (TS search)
+        #   callback provided         -> same as model (user wants refresh)
+        #
+        # Pass hessian_recompute_interval=0 to disable refresh entirely.
         if hessian_recompute_interval is None:
             init_is_model = (
                 isinstance(hessian, str)
@@ -657,7 +713,16 @@ class RSIRFO(Optimizer):
         )
 
     def _maybe_recompute(self) -> bool:
-        """Refresh the Hessian if the recompute schedule says so."""
+        """Refresh the Hessian if the recompute schedule says so.
+
+        Step 0 (``self._iteration <= 0``) is **always skipped**.  The initial
+        Hessian is always whatever was passed to ``hessian=`` at construction
+        time.  Recomputation can only happen at iteration 1 or later, when
+        ``iteration % hessian_recompute_interval == 0``.
+
+        Returns ``True`` if the Hessian was successfully replaced, ``False``
+        otherwise (schedule not due, interval disabled, or recompute failed).
+        """
         if (
             self.hessian_recompute_interval <= 0
             or self._iteration <= 0
