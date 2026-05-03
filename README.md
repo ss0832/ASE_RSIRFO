@@ -21,6 +21,7 @@ implemented as a drop-in [`ase.optimize`](https://wiki.fysik.dtu.dk/ase/) subcla
 git clone https://github.com/ss0832/ASE_RSIRFO.git
 cd ASE_RSIRFO
 pip install -e .
+# or pip install ase-rsirfo
 ```
 
 **Requirements:** Python ≥ 3.9, NumPy ≥ 1.24, SciPy ≥ 1.10, ASE ≥ 3.23
