@@ -44,40 +44,67 @@ opt = RSIRFO(atoms, trajectory="opt.traj", logfile="opt.log")
 opt.run(fmax=0.05)
 ```
 
-### Transition-state search (order=1)
+### Transition-state search (order=1) — recommended setup
+
+For a reliable TS search, **start from an exact numerical Hessian and recompute
+it every 5 steps**.  A model Hessian (Fischer/Swart) only captures rough
+element-pair curvatures; the exact Hessian guarantees that the optimizer begins
+with the correct sign along the reaction coordinate from the very first step.
+
+> **Why pre-compute?**  The internal recompute schedule (`hessian_recompute_interval`)
+> always skips step 0 — the initial Hessian is always whatever is passed to
+> the `hessian=` argument.  To start from the numerical Hessian you must
+> compute it beforehand with `numerical_hessian_from_forces` and pass the
+> resulting array as `hessian=`.
 
 ```python
-from ase_rsirfo import RSIRFO
+from ase_rsirfo import RSIRFO, numerical_hessian_from_forces
 
+# 1. Compute the exact Hessian at the TS guess geometry (costs 6N single points)
+H0 = numerical_hessian_from_forces(atoms, delta=0.01)
+
+# 2. Run the TS search, refreshing the Hessian every 5 accepted steps
 opt = RSIRFO(
     atoms,
-    order=1,                  # image-RFO: climb along the lowest mode
-    hessian="fischer",        # chemistry-aware initial Hessian (recommended)
-    # hessian_update defaults to "block_bofill" when order >= 1
-    # trust_radius defaults to 0.2 Å for TS search
+    order=1,                              # image-RFO: climb along the lowest mode
+    hessian=H0,                           # exact numerical Hessian as starting point
+    hessian_recompute_interval=5,         # recompute every 5 steps (must be set
+                                          # explicitly when hessian= is an ndarray)
+    hessian_recompute_method="numerical", # full numerical recompute at each refresh
+    numerical_hessian_step=0.01,          # finite-difference step in Angstrom
+    reset_history_on_recompute=True,      # clear secant history after each refresh
     trajectory="ts.traj",
 )
 opt.run(fmax=0.05)
 
-# Inspect the converged saddle
+# 3. Verify exactly one imaginary frequency at the converged geometry
 import numpy as np
 eigvals = np.linalg.eigvalsh(opt.hessian)
 n_imag = int(np.sum(eigvals < -1e-3))
 print(f"imaginary frequencies: {n_imag}  (expected 1 for a TS)")
 ```
 
-The image-RFO algorithm flips the sign of both the eigenvalue **and** the
-gradient component along the imaged modes (equivalent to applying
-``P = I - 2 v v^T`` to the Hessian and gradient, see Heyden et al. 2005).
-When `verbose=True` (default), the optimiser logs the Hessian eigenvalue
-spectrum and a diagnostic of how many modes are imaginary at every step,
-which is the most informative telltale during a TS hunt.
+**Cost note.** `numerical_hessian_from_forces` performs 6*N* single-point
+calculations (symmetric finite differences).  For large systems where this is
+prohibitive, see the [cheaper alternatives](#cheaper-alternatives-for-ts-search)
+below.
 
-A hard trust-radius cap is applied as a safety net: if the restricted-step
-solver returns a step larger than `trust_radius`, the step is rescaled
-uniformly while preserving its direction.
 
-### Accessing the converged Hessian
+The auto-default for `hessian_recompute_interval` depends on the initial
+Hessian type:
+
+| `hessian=` | `order=0` default | `order>=1` default |
+|------------|-------------------|--------------------|
+| `"callable"` / `"numerical"` / `"fischer"` / `"swart"` | 50 | **5** |
+| `"identity"` / `ndarray` | 0 (off) | **0 (off)** |
+
+When passing a pre-computed `ndarray`, you **must set `hessian_recompute_interval`
+explicitly** if you want periodic refreshes — the auto-default is 0 (off) for
+ndarray inputs.
+
+---
+
+## Accessing the converged Hessian
 
 `opt.hessian` returns the **translational/rotational (T/R) projected** Hessian
 ``P^T H P``, where ``P = I - Q^T Q`` and the columns of ``Q`` span the
@@ -101,50 +128,64 @@ print(f"imaginary frequencies: {n_imag}")
 H_raw = opt._hessian                     # raw internal Hessian (advanced use)
 ```
 
-### Fischer model Hessian with periodic refresh
+---
+
+## Analytic Hessian via callback
+
+If your calculator supports analytic second derivatives, pass them through the
+`hessian_callback` interface.  The callback is called at every scheduled
+refresh (including step 0 if you combine it with a pre-computed `H0`):
+
+```python
+def my_hessian(atoms):
+    """Return the (3N × 3N) Hessian in eV/Angstrom²."""
+    return atoms.calc.get_property("hessian")  # if supported by the calculator
+
+opt = RSIRFO(
+    atoms,
+    order=1,
+    hessian=my_hessian(atoms),            # analytic Hessian at step 0
+    hessian_recompute_interval=5,
+    hessian_recompute_method="callback",
+    hessian_callback=my_hessian,
+    reset_history_on_recompute=True,
+)
+opt.run(fmax=0.05)
+```
+
+---
+
+## Energy minimisation with Hessian refresh
+
+### Model Hessian refresh
 
 ```python
 opt = RSIRFO(
     atoms,
     hessian="fischer",               # initial model Hessian
-    hessian_recompute_interval=10,   # rebuild model every 10 steps
-    hessian_recompute_method="model",# use the same model at current geometry
+    hessian_recompute_interval=10,   # rebuild model every 10 steps (default: 50)
+    hessian_recompute_method="model",
 )
 opt.run(fmax=0.05)
 ```
 
-### Numerical Hessian refresh (works with any calculator)
+### Numerical Hessian refresh
 
 ```python
 opt = RSIRFO(
     atoms,
     hessian="identity",
-    hessian_recompute_interval=5,      # full Hessian every 5 steps
+    hessian_recompute_interval=5,
     hessian_recompute_method="numerical",
-    numerical_hessian_step=0.01,       # finite-difference step in Angstrom
+    numerical_hessian_step=0.01,
+    reset_history_on_recompute=True,
 )
 opt.run(fmax=0.05)
 ```
 
-### Analytic Hessian via callback
+---
 
-```python
-def my_hessian(atoms):
-    """Return the (3N x 3N) Hessian in eV/Angstrom^2."""
-    # e.g. call an external code, read from file, etc.
-    return atoms.calc.get_property("hessian")  # if supported
-
-opt = RSIRFO(
-    atoms,
-    hessian="identity",
-    hessian_recompute_interval=3,
-    hessian_recompute_method="callback",
-    hessian_callback=my_hessian,
-)
-opt.run(fmax=0.05)
-```
-
-### Restart
+## Restart
 
 ```python
 # First run (saves state to rsirfo.pckl)
@@ -164,14 +205,15 @@ opt2.run(fmax=0.01)
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `order` | `0` | Saddle order (0 = min, 1 = TS) |
-| `hessian` | `'identity'` | Initial Hessian: `'identity'`, `'fischer'`, `'swart'`, or `ndarray` |
+| `hessian` | `'identity'` | Initial Hessian: `'identity'`, `'fischer'`, `'swart'`, or `ndarray`. For TS searches, passing `numerical_hessian_from_forces(atoms)` here gives the exact curvature at step 0. |
 | `hessian_update` | auto | Quasi-Newton update method. Default: `'block_fsb'` for `order=0`, `'block_bofill'` for `order>=1`. Pass `'auto'` for the Bakó-Császár flowchart selector. |
 | `verbose` | `True` | Log Hessian eigenvalue spectrum at every step |
 | `eigval_log_count` | `10` | How many eigenvalues to display in verbose mode |
-| `hessian_recompute_interval` | auto | Refresh Hessian every N steps. Default: `0` (off) for `'identity'` or user `ndarray`; `50` (`order=0`) or `5` (`order>=1`) for `'fischer'`, `'swart'`, or when a callback is provided. Pass `0` explicitly to disable. |
-| `hessian_recompute_method` | `None` | `'model'`, `'numerical'`, `'callback'`, or `None` (auto) |
+| `hessian_recompute_interval` | auto | Refresh Hessian every N **accepted** steps. Step 0 is always skipped — the initial Hessian is always the `hessian=` argument. Auto-defaults: `5` (`order>=1`) or `50` (`order=0`) when `hessian=` is a model string; **`0` (off) when `hessian=` is `'identity'` or an `ndarray`** — set this explicitly when passing a pre-computed Hessian. Pass `0` to disable refresh entirely. |
+| `hessian_recompute_method` | `None` | `'model'`, `'numerical'`, `'callback'`, or `None` (auto). Auto selects `'model'` for model-string starts, `'numerical'` otherwise. |
 | `hessian_callback` | `None` | Callable `(Atoms) -> ndarray` for analytic Hessian |
-| `numerical_hessian_step` | `0.01` | Finite-difference step (Angstrom) |
+| `numerical_hessian_step` | `0.01` | Finite-difference step (Angstrom) for numerical Hessian |
+| `reset_history_on_recompute` | `True` | Clear quasi-Newton secant history after each Hessian refresh |
 | `trust_radius` | `0.3` / `0.2` | Initial trust radius in Angstrom (min / TS default) |
 | `trust_radius_max` | `0.5` / `0.2` | Maximum trust radius in Angstrom (min / TS default) |
 | `use_adaptive_trust_radius` | `True` | Fletcher ratio-based TR adaptation |
