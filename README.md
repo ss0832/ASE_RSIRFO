@@ -53,7 +53,7 @@ opt = RSIRFO(
     order=1,                  # image-RFO: climb along the lowest mode
     hessian="fischer",        # chemistry-aware initial Hessian (recommended)
     # hessian_update defaults to "block_bofill" when order >= 1
-    trust_radius=0.05,        # small TR for TS search
+    # trust_radius defaults to 0.2 Å for TS search
     trajectory="ts.traj",
 )
 opt.run(fmax=0.05)
@@ -75,6 +75,30 @@ which is the most informative telltale during a TS hunt.
 A hard trust-radius cap is applied as a safety net: if the restricted-step
 solver returns a step larger than `trust_radius`, the step is rescaled
 uniformly while preserving its direction.
+
+### Accessing the converged Hessian
+
+`opt.hessian` returns the **translational/rotational (T/R) projected** Hessian
+``P^T H P``, where ``P = I - Q^T Q`` and the columns of ``Q`` span the
+rigid-body modes of the molecule.  This means spurious near-zero or slightly
+negative eigenvalues that arise from numerical noise along T/R modes are
+explicitly zeroed out, and `np.linalg.eigvalsh(opt.hessian)` gives a clean
+count of imaginary frequencies immediately after convergence.
+
+The raw (unprojected) internal Hessian is available as `opt._hessian` if
+needed for custom post-processing.
+
+```python
+# After opt.run():
+import numpy as np
+
+H = opt.hessian                          # T/R-projected  (recommended)
+eigvals = np.linalg.eigvalsh(H)
+n_imag = int(np.sum(eigvals < -1e-3))
+print(f"imaginary frequencies: {n_imag}")
+
+H_raw = opt._hessian                     # raw internal Hessian (advanced use)
+```
 
 ### Fischer model Hessian with periodic refresh
 
@@ -147,8 +171,8 @@ opt2.run(fmax=0.01)
 | `hessian_recompute_method` | `None` | `'model'`, `'numerical'`, `'callback'`, or `None` (auto) |
 | `hessian_callback` | `None` | Callable `(Atoms) -> ndarray` for analytic Hessian |
 | `numerical_hessian_step` | `0.01` | Finite-difference step (Angstrom) |
-| `trust_radius` | `0.5` / `0.2` | Initial trust radius in Angstrom (min / TS default) |
-| `trust_radius_max` | `0.5` | Maximum trust radius (Angstrom) |
+| `trust_radius` | `0.3` / `0.2` | Initial trust radius in Angstrom (min / TS default) |
+| `trust_radius_max` | `0.5` / `0.2` | Maximum trust radius in Angstrom (min / TS default) |
 | `use_adaptive_trust_radius` | `True` | Fletcher ratio-based TR adaptation |
 | `project_translation` | `True` | Project out translational modes |
 | `project_rotation` | auto | Project out rotational modes (auto: False for PBC) |
