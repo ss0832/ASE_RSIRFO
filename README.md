@@ -147,7 +147,7 @@ opt2.run(fmax=0.01)
 | `hessian_recompute_method` | `None` | `'model'`, `'numerical'`, `'callback'`, or `None` (auto) |
 | `hessian_callback` | `None` | Callable `(Atoms) -> ndarray` for analytic Hessian |
 | `numerical_hessian_step` | `0.01` | Finite-difference step (Angstrom) |
-| `trust_radius` | `0.3` / `0.1` | Initial trust radius in Angstrom (min / TS default) |
+| `trust_radius` | `0.5` / `0.2` | Initial trust radius in Angstrom (min / TS default) |
 | `trust_radius_max` | `0.5` | Maximum trust radius (Angstrom) |
 | `use_adaptive_trust_radius` | `True` | Fletcher ratio-based TR adaptation |
 | `project_translation` | `True` | Project out translational modes |
