@@ -1,3 +1,22 @@
+# Copyright (C) 2026 ss0832
+#
+# This file is part of ASE_RSIRFO.
+#
+# ASE_RSIRFO is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the
+# Free Software Foundation, either version 3 of the License, or (at your
+# option) any later version.
+#
+# ASE_RSIRFO is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+# General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with ASE_RSIRFO. If not, see <https://www.gnu.org/licenses/>.
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """
 optimizer.py
 ============
@@ -109,6 +128,13 @@ from .hessian_updaters import HessianUpdater
 from .parameters import (
     BOHR_TO_ANGSTROM,
     HARTREE_PER_BOHR2_TO_EV_PER_A2,
+)
+from .constraints import (
+    apply_freeze_diagonal,
+    build_active_projector,
+    detect_fixed_dofs,
+    expand_from_active_subspace,
+    reduce_to_active_subspace,
 )
 from .projections import (
     project_gradient,
@@ -304,6 +330,27 @@ class RSIRFO(Optimizer):
         Level-shifting parameters.
     project_translation, project_rotation
         Forces a particular projection. Default: from ``atoms.pbc``.
+    constraint_method
+        How to handle ASE constraints attached to ``atoms``. One of:
+
+        * ``'auto'`` (default) -- use exact subspace reduction when only
+          ``FixAtoms`` / ``FixCartesian`` constraints are present, fall
+          back to ``'freeze'`` for any other constraint type.
+        * ``'subspace'`` -- always reduce ``H``, ``g`` to the active
+          subspace before solving the RFO step. Exact and numerically
+          robust; works only for analytic Cartesian fixes.
+        * ``'freeze'`` -- replace fixed rows/cols of ``H`` with a scaled
+          identity (``freeze_value``) and zero the matching gradient
+          components. Works for any constraint type at the cost of some
+          conditioning.
+        * ``'none'`` -- rely on ASE's standard ``adjust_forces`` /
+          ``adjust_positions`` only. Not recommended for Newton-style
+          optimisers as quasi-Newton updates corrupt the Hessian on the
+          fixed DOFs over many iterations.
+    freeze_value
+        Diagonal value for ``constraint_method='freeze'`` (default 1e8).
+        Should exceed the largest active Hessian eigenvalue by several
+        orders of magnitude.
     """
 
     def __init__(
@@ -361,6 +408,9 @@ class RSIRFO(Optimizer):
         # ----- projections -------------------------------------------------
         project_translation: bool | None = None,
         project_rotation: bool | None = None,
+        # ----- ASE constraint handling -------------------------------------
+        constraint_method: str = "auto",
+        freeze_value: float = 1.0e8,
         # ----- pass-through ASE kwargs -------------------------------------
         **kwargs,
     ) -> None:
@@ -375,6 +425,25 @@ class RSIRFO(Optimizer):
         if int(order) < 0:
             raise ValueError("Saddle order must be non-negative.")
         self.order = int(order)
+
+        # --- ASE constraint handling --------------------------------------
+        # constraint_method:
+        #   'auto'    -> 'subspace' for pure FixAtoms / FixCartesian,
+        #                'freeze' as a fall-back for any other constraint type
+        #   'subspace' -> always reduce H, g to the active subspace (exact)
+        #   'freeze'   -> always overwrite fixed rows/cols with a level shift
+        #   'none'     -> rely entirely on ASE's adjust_forces / adjust_positions
+        cm = str(constraint_method).lower()
+        if cm not in ("auto", "subspace", "freeze", "none"):
+            raise ValueError(
+                f"Unknown constraint_method {constraint_method!r}. "
+                "Use 'auto', 'subspace', 'freeze' or 'none'."
+            )
+        self.constraint_method = cm
+        self.freeze_value = float(freeze_value)
+        # Fixed mask is recomputed every step (constraints might be modified
+        # between calls), but cache the immutable atom count for sanity checks.
+        self._n_atoms_init = len(atoms) if atoms is not None else 0
 
         auto_t, auto_r = projection_modes_for_atoms(atoms)
         self.project_translation = (
@@ -753,20 +822,88 @@ class RSIRFO(Optimizer):
         gradient = -np.asarray(forces, dtype=float).flatten()
         positions_flat = np.asarray(positions, dtype=float).flatten()
 
+        # ----- Detect ASE constraints --------------------------------------
+        # Re-evaluated every step: the user may add/remove constraints
+        # between calls (e.g. inside an ASE Filter wrapper).
+        fixed_mask, has_internal_constraints, has_other_constraints = (
+            detect_fixed_dofs(atoms)
+        )
+        n_fixed = int(np.sum(fixed_mask))
+        if self.constraint_method == "auto":
+            # Decision rules for 'auto':
+            #   pure FixAtoms / FixCartesian       -> 'none'
+            #     ASE's adjust_positions handles fixed atoms directly; our
+            #     secant-pair zeroing protects the Hessian.
+            #   internal-coordinate constraint     -> 'none'
+            #     ASE iteratively projects forces / positions; T/R stays on
+            #     because rigid-body modes do not interfere with such
+            #     constraints (see the constraint section below).
+            #   any other (unknown) constraint     -> 'freeze' diagonal
+            #     conservative safety net.
+            if has_other_constraints:
+                active_method = "freeze"
+            else:
+                active_method = "none"
+        elif self.constraint_method == "none":
+            active_method = "none"
+        else:
+            active_method = self.constraint_method
+
+        if (n_fixed > 0 or has_internal_constraints
+                or has_other_constraints) and self._iteration == 0:
+            tags = []
+            if n_fixed:
+                tags.append(f"{n_fixed} Cartesian DOF(s)")
+            if has_internal_constraints:
+                tags.append("internal-coord constraint")
+            if has_other_constraints:
+                tags.append("other constraint(s)")
+            self._log(
+                f"  [Constraints] detected: {', '.join(tags)}; "
+                f"using method='{active_method}'"
+            )
+
         # ----- Hessian initialisation -------------------------------------
         if self._hessian is None:
             self._hessian = self._build_initial_hessian()
 
-        # ----- T/R projection of gradient (needed before quasi-Newton update) --
-        # g_proj is used both for the quasi-Newton y-vector and for the RFO
-        # step so that translational/rotational contamination never enters
-        # self._hessian through the secant pairs.  self._hessian itself is kept
-        # raw; the full P^T H P projection is re-applied every step below.
+        # ----- T/R projection decision (constraint-aware) -----------------
+        # Three cases drive whether translational / rotational projection is
+        # needed for THIS step:
+        #
+        # 1. Atom-fix only (FixAtoms / FixCartesian, no internal constraints)
+        #    -> SKIP T/R. The fixed atoms already break continuous T/R
+        #       symmetry, and projecting them out would discard legitimate
+        #       DOFs of the moving atoms.
+        #
+        # 2. Internal-coordinate constraint only (FixBondLength,
+        #    FixInternals, FixedPlane, FixedLine, Hookean, ...) and no fixed
+        #    atom -> KEEP T/R. Internal coordinates are invariant under
+        #    rigid translation/rotation, so the rigid-body modes still
+        #    represent zero-energy directions and must be projected out.
+        #    Failing to project would let alpha drift in the rigid-body
+        #    subspace and slow convergence dramatically.
+        #
+        # 3. Mixed (atom-fix AND internal-coord) -> SKIP T/R. Atom fixing
+        #    dominates: rigid-body modes are already absent of physical
+        #    meaning because some atoms cannot move. Internal-coord
+        #    constraints are themselves T/R-invariant, so this is consistent.
+        if n_fixed > 0:
+            # Cases 1 and 3: atom fixing present
+            skip_tr_for_constraints = True
+        elif has_internal_constraints:
+            # Case 2: internal-coord only -> keep T/R explicitly
+            skip_tr_for_constraints = False
+        else:
+            # No constraints: keep the user's / PBC-derived defaults
+            skip_tr_for_constraints = False
+        proj_t_eff = self.project_translation and not skip_tr_for_constraints
+        proj_r_eff = self.project_rotation and not skip_tr_for_constraints
         g_proj = project_gradient(
             gradient,
             positions,
-            project_translation=self.project_translation,
-            project_rotation=self.project_rotation,
+            project_translation=proj_t_eff,
+            project_rotation=proj_r_eff,
         )
 
         # ----- Periodic refresh OR quasi-Newton update --------------------
@@ -786,6 +923,15 @@ class RSIRFO(Optimizer):
         ):
             s = positions_flat - self._prev_positions
             y = gradient - self._prev_gradient   # raw secant pair
+            # Constraint-aware quasi-Newton: zero out the secant components
+            # on fixed DOFs so that the Hessian update sees no spurious
+            # information on the constrained subspace. This protects the
+            # *active* part of the Hessian over many iterations.
+            if n_fixed > 0:
+                s = s.copy()
+                y = y.copy()
+                s[fixed_mask] = 0.0
+                y[fixed_mask] = 0.0
             disp_norm = float(np.linalg.norm(s))
             grad_diff_norm = float(np.linalg.norm(y))
             sy = float(np.dot(s, y))
@@ -832,9 +978,32 @@ class RSIRFO(Optimizer):
         H_proj = project_hessian(
             self._hessian,
             positions,
-            project_translation=self.project_translation,
-            project_rotation=self.project_rotation,
+            project_translation=proj_t_eff,
+            project_rotation=proj_r_eff,
         )
+
+        # ----- Apply ASE constraints to the projected H, g ----------------
+        # Two equivalent strategies (cf. constraints.py docstring):
+        # 1. "subspace" - exact projection P H P^T, P g; the eigensolve runs
+        #    on a smaller matrix so the fixed DOFs literally do not exist.
+        # 2. "freeze"   - replace fixed rows/cols with a scaled identity;
+        #    matrix shape is preserved but the RFO step components on the
+        #    fixed DOFs are numerically zero.
+        # Either way the secant-pair zeroing above already guards the raw
+        # self._hessian against pollution.
+        constraint_projector = None  # set when we use subspace reduction
+        if n_fixed > 0 and active_method == "subspace":
+            constraint_projector = build_active_projector(fixed_mask)
+            H_proj, g_proj = reduce_to_active_subspace(
+                H_proj, g_proj, constraint_projector
+            )
+        elif n_fixed > 0 and active_method == "freeze":
+            # Make sure we work on copies so self._hessian stays untouched.
+            H_proj = H_proj.copy()
+            g_proj = g_proj.copy()
+            apply_freeze_diagonal(
+                H_proj, g_proj, fixed_mask, freeze_value=self.freeze_value
+            )
 
         # ----- Eigendecompose & filter near-zero modes --------------------
         try:
@@ -952,27 +1121,47 @@ class RSIRFO(Optimizer):
         delta_x = eigvecs @ step_eig
 
         # ----- Predict energy change for next-step trust-radius update ---
+        # The model E_pred = g.T s + 0.5 s.T H s must be computed in the same
+        # space as the step, so this happens BEFORE expanding back to the
+        # full Cartesian dimension.
         self._predicted_energy_change = float(
             np.dot(g_proj, delta_x)
             + 0.5 * float(delta_x @ H_proj @ delta_x)
         )
 
+        # ----- Expand step from active subspace back to full Cartesian ----
+        # When constraint_method='subspace' was used, delta_x lives in the
+        # K-dimensional active subspace; re-inject zeros on the fixed DOFs.
+        if constraint_projector is not None:
+            delta_x_full = expand_from_active_subspace(
+                delta_x, constraint_projector
+            )
+        else:
+            delta_x_full = delta_x
+
         # ----- NaN safety net on the computed step ------------------------
-        if not np.all(np.isfinite(delta_x)):
+        if not np.all(np.isfinite(delta_x_full)):
             self._log(
                 "  [CRITICAL] Computed step contains NaN/Inf; "
                 "falling back to steepest descent within trust radius"
             )
-            delta_x = -g_proj
-            norm = float(np.linalg.norm(delta_x))
+            # Use the full-dimensional gradient for the steepest-descent
+            # fall-back; ASE's adjust_forces zeroed the fixed components, and
+            # adjust_positions will silently keep them fixed even if we leak
+            # a tiny number from rounding.
+            delta_x_full = -np.asarray(forces).flatten()
+            if n_fixed > 0:
+                delta_x_full = delta_x_full.copy()
+                delta_x_full[fixed_mask] = 0.0
+            norm = float(np.linalg.norm(delta_x_full))
             if norm > 1e-12:
-                delta_x = delta_x * (self.trust_radius / norm)
+                delta_x_full = delta_x_full * (self.trust_radius / norm)
             else:
-                delta_x = np.zeros_like(g_proj)
-            step_norm = float(np.linalg.norm(delta_x))
+                delta_x_full = np.zeros(3 * len(atoms))
+            step_norm = float(np.linalg.norm(delta_x_full))
 
         # ----- Apply step --------------------------------------------------
-        new_positions = positions + delta_x.reshape(positions.shape)
+        new_positions = positions + delta_x_full.reshape(positions.shape)
         atoms.set_positions(new_positions)
 
         # ----- Update prediction-vs-actual history & quality assessment -

@@ -269,6 +269,64 @@ See `NOTICE.md` for the complete bibliography.
 
 ---
 
+## ASE constraint support
+
+`RSIRFO` honours the standard ASE constraint mechanism
+(`atoms.set_constraint(...)`). Three categories of constraints are
+recognised, each handled by a tailored strategy:
+
+| Constraint category | Examples | Cartesian mask | Internal | T/R projection | RFO step processing |
+|---|---|---|---|---|---|
+| **Atom fix** | `FixAtoms`, `FixCartesian` | yes | no | **OFF** (fixed atoms break rigid-body symmetry) | `'auto'` ⇒ `'none'` (rely on ASE) + secant zeroing |
+| **Internal-coord fix** | `FixBondLength`, `FixInternals` (angles, dihedrals), `FixedPlane`, `FixedLine`, `Hookean` | no | yes | **ON** (internal coords are T/R-invariant; rigid-body modes remain zero-energy directions) | `'auto'` ⇒ `'none'` (rely on ASE's iterative adjuster) |
+| **Mixed** | atom-fix AND internal-coord | yes | yes | **OFF** (atom-fix dominates) | `'auto'` ⇒ `'none'` |
+
+Two universal protections are applied regardless of the chosen method:
+
+1. **Quasi-Newton update protection** — the secant pair `(s, y)` used by
+   the Hessian update is zeroed on fixed Cartesian DOFs every step, preventing
+   accumulation of spurious information on the constrained subspace.
+2. **T/R projection auto-decision** — chosen at the start of every step
+   from the constraint signature, so users do not need to think about it.
+
+The `constraint_method` argument controls the RFO-step-level processing:
+
+| Method | What it does | When to use |
+|--------|--------------|-------------|
+| `'auto'` (default) | Pick `'none'` for recognised constraints + secant zeroing; `'freeze'` as a safety net for unrecognised constraint types | Recommended in most cases |
+| `'subspace'` | Project `H`, `g` to the active Cartesian subspace; solve the RFO equations on a smaller matrix; expand the step back at the end | Exact for FixAtoms / FixCartesian; ignored for purely internal constraints |
+| `'freeze'` | Replace fixed rows/cols of `H` with `freeze_value` * I, zero matching gradient components | Required when the constraint cannot be expressed as an analytic Cartesian projection |
+| `'none'` | Rely entirely on ASE's `adjust_forces` / `adjust_positions` | Diagnostic / control; same as `'auto'` for recognised constraints |
+
+Examples:
+
+```python
+from ase.constraints import FixAtoms, FixBondLength, FixInternals
+from ase_rsirfo import RSIRFO
+
+# (a) Pin two atoms in space
+atoms.set_constraint(FixAtoms(indices=[0, 5]))
+RSIRFO(atoms, hessian="fischer").run(fmax=0.05)
+
+# (b) Hold a bond length fixed
+atoms.set_constraint(FixBondLength(3, 4))
+RSIRFO(atoms, hessian="identity").run(fmax=0.05)
+
+# (c) Hold an angle fixed at 120 deg
+atoms.set_constraint(FixInternals(angles_deg=[[120.0, [0, 1, 2]]]))
+RSIRFO(atoms, hessian="identity").run(fmax=0.05)
+
+# (d) Mixed: FixAtoms + FixBondLength
+atoms.set_constraint([FixAtoms(indices=[0]), FixBondLength(2, 3)])
+RSIRFO(atoms, hessian="identity").run(fmax=0.05)
+```
+
+See `examples/05_constraints.py` (atom fixes) and
+`examples/06_internal_constraints.py` (bond / angle / dihedral / mixed)
+for full working demonstrations.
+
+---
+
 ## License
 
 Copyright (C) 2026 ss0832  

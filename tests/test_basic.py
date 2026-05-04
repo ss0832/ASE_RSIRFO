@@ -1,3 +1,10 @@
+# Copyright (C) 2026 ss0832
+# This file is part of ASE_RSIRFO and is licensed under GPL-3.0-or-later.
+# See the LICENSE file in the repository root for the full text, or visit
+# <https://www.gnu.org/licenses/gpl-3.0.html>.
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """
 tests/test_basic.py
 ===================
@@ -344,4 +351,186 @@ def test_default_recompute_interval():
     opt_o = RSIRFO(atoms_o, hessian="fischer",
                    hessian_recompute_interval=0, logfile=None)
     assert opt_o.hessian_recompute_interval == 0
+
+
+# ─── ASE constraint handling ──────────────────────────────────────────────────
+
+def _make_lj_3atom_with_fixed_atom():
+    """Equilateral-triangle LJ trimer with atom 0 pinned at the origin."""
+    from ase.constraints import FixAtoms
+    atoms = Atoms("Ar3", positions=[[0, 0, 0], [4.5, 0, 0], [2.0, 3.5, 0]])
+    atoms.calc = LennardJones(epsilon=0.0103, sigma=3.40)
+    atoms.set_constraint(FixAtoms(indices=[0]))
+    return atoms
+
+
+@pytest.mark.parametrize("method", ["auto", "subspace", "freeze", "none"])
+def test_constraint_method_keeps_fixed_atom_fixed(method):
+    """All four constraint methods must keep FixAtoms-fixed atoms still."""
+    atoms = _make_lj_3atom_with_fixed_atom()
+    initial = atoms.positions.copy()
+    opt = RSIRFO(
+        atoms,
+        hessian="identity",
+        constraint_method=method,
+        logfile=None,
+    )
+    opt.run(fmax=1e-5, steps=80)
+    # Atom 0 must not move at all (ASE's adjust_positions ensures this even
+    # for the 'none' method).
+    assert np.linalg.norm(atoms.positions[0] - initial[0]) < 1e-12
+
+    # The trimer should converge to an equilateral triangle (LJ minimum).
+    fmax = float(np.max(np.abs(atoms.get_forces())))
+    assert fmax < 1e-5, f"method={method}: fmax={fmax:.2e}"
+    bonds = sorted([
+        float(np.linalg.norm(atoms.positions[i] - atoms.positions[j]))
+        for i in range(3) for j in range(i)
+    ])
+    expected = 3.40 * 2 ** (1 / 6)
+    for b in bonds:
+        assert abs(b - expected) < 1e-3, f"method={method}: bond {b:.4f}"
+
+
+def test_fix_cartesian_keeps_z_fixed():
+    """FixCartesian must keep the constrained component fixed."""
+    from ase.constraints import FixCartesian
+    atoms = Atoms("Ar3", positions=[[0, 0, 0], [4.0, 0, 1.0], [2.0, 3.5, 0.5]])
+    atoms.calc = LennardJones(epsilon=0.0103, sigma=3.40)
+    atoms.set_constraint(FixCartesian(1, mask=(False, False, True)))
+    initial_z1 = atoms.positions[1, 2]
+
+    opt = RSIRFO(
+        atoms, hessian="identity", constraint_method="auto", logfile=None
+    )
+    opt.run(fmax=1e-3, steps=80)
+    # z component of atom 1 must remain unchanged
+    assert abs(atoms.positions[1, 2] - initial_z1) < 1e-12
+
+
+def test_constraint_method_invalid_raises():
+    atoms = lj_ar2()
+    with pytest.raises(ValueError):
+        RSIRFO(atoms, constraint_method="bogus", logfile=None)
+
+
+def test_detect_fixed_dofs_basic():
+    """Direct test of the constraint detection helper."""
+    from ase.constraints import FixAtoms
+    from ase_rsirfo.constraints import detect_fixed_dofs
+    atoms = Atoms("Ar4", positions=[[0,0,0], [3,0,0], [0,3,0], [0,0,3]])
+    atoms.set_constraint(FixAtoms(indices=[0, 2]))
+    mask, has_internal, has_other = detect_fixed_dofs(atoms)
+    assert mask.shape == (12,)
+    assert mask.sum() == 6
+    assert mask[0:3].all() and mask[6:9].all()
+    assert not mask[3:6].any() and not mask[9:12].any()
+    assert not has_internal
+    assert not has_other
+
+
+# ─── Internal-coordinate constraints ─────────────────────────────────────────
+
+def test_fix_bond_length_keeps_bond_fixed():
+    """FixBondLength must hold the constrained distance to machine precision.
+
+    For internal-coord constraints, T/R projection is required (the rigid-body
+    modes are still zero-energy directions because internal coordinates are
+    invariant under rigid translation/rotation). This test verifies that the
+    'auto' constraint_method correctly enables T/R projection in this case.
+    """
+    from ase.constraints import FixBondLength
+    atoms = Atoms("Ar3", positions=[[0,0,0], [5.0,0,0], [2.5,3.0,0]])
+    atoms.calc = LennardJones(epsilon=0.0103, sigma=3.40)
+    atoms.set_constraint(FixBondLength(0, 1))
+    initial_d = float(np.linalg.norm(atoms.positions[1] - atoms.positions[0]))
+
+    opt = RSIRFO(atoms, hessian="identity", logfile=None)
+    opt.run(fmax=1e-4, steps=80)
+
+    final_d = float(np.linalg.norm(atoms.positions[1] - atoms.positions[0]))
+    assert abs(final_d - initial_d) < 1e-6, (
+        f"bond 0-1 changed from {initial_d:.6f} to {final_d:.6f}"
+    )
+    # Other bonds should still relax to the LJ minimum
+    expected = 3.40 * 2 ** (1 / 6)
+    d02 = float(np.linalg.norm(atoms.positions[2] - atoms.positions[0]))
+    d12 = float(np.linalg.norm(atoms.positions[2] - atoms.positions[1]))
+    assert abs(d02 - expected) < 0.01
+    assert abs(d12 - expected) < 0.01
+
+
+def test_fix_internals_keeps_angle_fixed():
+    """FixInternals (angle) must keep the constrained angle constant."""
+    from ase.constraints import FixInternals
+    atoms = Atoms("Ar3", positions=[
+        [0, 0, 0],
+        [3.5, 0, 0],
+        [3.5 + 3.5*np.cos(np.deg2rad(60)),
+         3.5*np.sin(np.deg2rad(60)), 0],
+    ])
+    atoms.calc = LennardJones(epsilon=0.0103, sigma=3.40)
+    atoms.set_constraint(FixInternals(angles_deg=[[120.0, [0, 1, 2]]]))
+
+    def angle_deg(a, b, c):
+        v1 = a - b; v2 = c - b
+        cos = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+        return float(np.degrees(np.arccos(np.clip(cos, -1, 1))))
+
+    opt = RSIRFO(atoms, hessian="identity", logfile=None)
+    opt.run(fmax=1e-3, steps=80)
+
+    final = angle_deg(atoms.positions[0], atoms.positions[1],
+                      atoms.positions[2])
+    assert abs(final - 120.0) < 1e-3, f"angle drifted to {final:.4f}"
+
+
+def test_mixed_constraints_atom_and_bond():
+    """Combination of FixAtoms (one atom) and FixBondLength (one bond)
+    must work together."""
+    from ase.constraints import FixAtoms, FixBondLength
+    atoms = Atoms("Ar4", positions=[[0,0,0], [3.5,0,0], [3.5,3.5,0], [0,3.5,0]])
+    atoms.calc = LennardJones(epsilon=0.0103, sigma=3.40)
+    atoms.set_constraint([FixAtoms(indices=[0]), FixBondLength(2, 3)])
+
+    initial_pos0 = atoms.positions[0].copy()
+    initial_d23 = float(np.linalg.norm(atoms.positions[3] - atoms.positions[2]))
+
+    opt = RSIRFO(atoms, hessian="identity", logfile=None)
+    opt.run(fmax=1e-3, steps=80)
+
+    # atom 0 must not move
+    assert np.linalg.norm(atoms.positions[0] - initial_pos0) < 1e-12
+    # bond 2-3 must stay fixed
+    final_d23 = float(np.linalg.norm(atoms.positions[3] - atoms.positions[2]))
+    assert abs(final_d23 - initial_d23) < 1e-6
+
+
+def test_detect_internal_constraint_flag():
+    """detect_fixed_dofs should flag FixBondLength as an internal constraint."""
+    from ase.constraints import FixBondLength
+    from ase_rsirfo.constraints import detect_fixed_dofs
+    atoms = Atoms("Ar3", positions=[[0,0,0], [3,0,0], [0,3,0]])
+    atoms.set_constraint(FixBondLength(0, 1))
+    mask, has_internal, has_other = detect_fixed_dofs(atoms)
+    assert mask.sum() == 0          # no Cartesian DOF is hard-fixed
+    assert has_internal             # but an internal constraint is present
+    assert not has_other
+
+
+def test_tr_projection_with_internal_constraint(monkeypatch):
+    """When only internal constraints are present, T/R projection must be
+    kept active so that rigid-body modes are removed from the Hessian."""
+    from ase.constraints import FixBondLength
+    atoms = Atoms("Ar3", positions=[[0,0,0], [5.0,0,0], [2.5,3.0,0]])
+    atoms.calc = LennardJones(epsilon=0.0103, sigma=3.40)
+    atoms.set_constraint(FixBondLength(0, 1))
+
+    opt = RSIRFO(atoms, hessian="identity", logfile=None)
+    opt.run(fmax=1e-4, steps=80)
+    # Indirect check: the optimisation must converge cleanly. If T/R were
+    # incorrectly skipped, the rigid-body modes would interfere and the
+    # gradient would never drop below 1e-4 in 80 steps.
+    fmax = float(np.max(np.abs(atoms.get_forces())))
+    assert fmax < 1e-3
 

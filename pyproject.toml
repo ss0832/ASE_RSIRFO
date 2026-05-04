@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ASE_RSIRFO"
-version = "0.1.1"
+version = "0.1.2"
 description = "Restricted-Step Image Rational Function Optimisation (RS-I-RFO) as an ASE Optimizer subclass"
 readme = "README.md"
 license = "GPL-3.0-or-later"
