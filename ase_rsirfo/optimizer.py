@@ -582,28 +582,126 @@ class RSIRFO(Optimizer):
             **kwargs,
         )
 
-    # -------------------------------------------------------- hessian property
-    @property
-    def hessian(self) -> "np.ndarray | None":
-        """Return the T/R-projected Hessian.
+    # ----------------------------------------------------- Hessian accessors
+    #
+    # Three ways to read the optimiser's internal Hessian, in order of
+    # increasing post-processing:
+    #
+    #   * :meth:`get_raw_hessian` -- the bare quasi-Newton matrix as stored.
+    #     No projection, no constraint handling. Use this if you want the
+    #     full Cartesian curvature signal without any modes removed.
+    #
+    #   * :meth:`get_hessian` -- one-stop accessor with explicit knobs.
+    #     Defaults match what the optimiser uses internally for the RFO
+    #     solve at the *current* step (T/R projection from constraint
+    #     state, no constraint freeze applied). Override the keyword
+    #     arguments to switch on/off any post-processing step.
+    #
+    #   * the :pyattr:`hessian` property -- backward-compatible shortcut
+    #     equivalent to ``get_hessian(project_tr=True)`` with the default
+    #     ``project_translation`` / ``project_rotation`` flags from the
+    #     constructor. Returns ``None`` before the first step.
+    #
+    # The setter on the property writes to the raw store (no projection).
 
-        Internally the optimiser stores the raw quasi-Newton Hessian in
-        ``_hessian``.  This property projects the raw matrix on read so that
-        any external access -- including post-convergence eigenvalue analysis
-        and frequency counting -- always sees a clean Hessian with T/R modes
-        properly zeroed out.
+    def get_raw_hessian(self) -> "np.ndarray | None":
+        """Return the raw Cartesian Hessian without any projection.
+
+        This is the matrix that the quasi-Newton update writes into; it
+        contains the full curvature signal including translation /
+        rotation modes and any DOFs frozen by ASE constraints. Useful for
+        debugging Hessian-update behaviour or for serialising the matrix
+        to a file.
+
+        Returns
+        -------
+        H : np.ndarray of shape (3*N, 3*N), or None
+            The stored Hessian, or ``None`` if no step has been taken yet.
         """
         if self._hessian is None:
             return None
+        return np.array(self._hessian, copy=True)
+
+    def get_hessian(
+        self,
+        *,
+        project_tr: bool | None = None,
+        apply_constraints: bool = False,
+    ) -> "np.ndarray | None":
+        """Return the optimiser's Hessian with optional post-processing.
+
+        Parameters
+        ----------
+        project_tr
+            If ``True``, remove translation / rotation modes via
+            ``P^T H P`` (using the optimiser's stored
+            :pyattr:`project_translation` / :pyattr:`project_rotation`
+            flags). If ``False``, skip T/R projection. If ``None``
+            (default), project T/R only when no fixed atoms are present
+            (matching the constraint-aware logic used at step time).
+        apply_constraints
+            If ``True``, additionally apply the freeze-diagonal treatment
+            for ASE constraints attached to ``atoms`` (so that fixed
+            Cartesian DOFs have their rows/columns replaced by a scaled
+            identity, ``freeze_value``). Default ``False`` to keep the
+            output free of artificial values that would distort an
+            eigenvalue analysis.
+
+        Returns
+        -------
+        H : np.ndarray of shape (3*N, 3*N), or None
+            The processed Hessian, or ``None`` if no step has been taken.
+        """
+        if self._hessian is None:
+            return None
+
+        H = np.array(self._hessian, copy=True)
         positions = getattr(self.atoms, "get_positions", lambda: None)()
-        if positions is None:
-            return self._hessian
-        return project_hessian(
-            self._hessian,
-            positions,
-            project_translation=self.project_translation,
-            project_rotation=self.project_rotation,
-        )
+
+        # --- decide T/R projection ------------------------------------
+        if project_tr is None:
+            try:
+                fixed_mask, _has_internal, _has_other = detect_fixed_dofs(
+                    self.atoms
+                )
+                n_fixed = int(np.sum(fixed_mask))
+            except Exception:  # noqa: BLE001
+                n_fixed = 0
+            do_tr = (n_fixed == 0)
+        else:
+            do_tr = bool(project_tr)
+
+        if do_tr and positions is not None:
+            H = project_hessian(
+                H,
+                positions,
+                project_translation=self.project_translation,
+                project_rotation=self.project_rotation,
+            )
+
+        # --- optional constraint freeze --------------------------------
+        if apply_constraints:
+            try:
+                fixed_mask, _hi, _ho = detect_fixed_dofs(self.atoms)
+                if int(np.sum(fixed_mask)) > 0:
+                    g_dummy = np.zeros(H.shape[0])
+                    apply_freeze_diagonal(
+                        H, g_dummy, fixed_mask,
+                        freeze_value=self.freeze_value,
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+
+        return H
+
+    @property
+    def hessian(self) -> "np.ndarray | None":
+        """Return the T/R-projected Hessian (backward-compatible shortcut).
+
+        For more control, use :meth:`get_hessian` (explicit projection
+        flags) or :meth:`get_raw_hessian` (no projection).
+        """
+        return self.get_hessian(project_tr=True, apply_constraints=False)
 
     @hessian.setter
     def hessian(self, value: "np.ndarray | None") -> None:

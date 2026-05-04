@@ -534,3 +534,112 @@ def test_tr_projection_with_internal_constraint(monkeypatch):
     fmax = float(np.max(np.abs(atoms.get_forces())))
     assert fmax < 1e-3
 
+
+# ─── Hessian accessor API (get_hessian / get_raw_hessian) ────────────────────
+
+def test_get_raw_hessian_before_step():
+    """Accessor must return None before any step has been taken."""
+    atoms = lj_ar2()
+    opt = RSIRFO(atoms, hessian="identity", logfile=None)
+    assert opt.get_raw_hessian() is None
+    assert opt.get_hessian() is None
+    assert opt.hessian is None
+
+
+def test_get_raw_hessian_returns_copy():
+    """Mutating the returned Hessian must not corrupt the optimiser state."""
+    atoms = lj_ar2()
+    opt = RSIRFO(atoms, hessian="identity", logfile=None)
+    opt.run(fmax=1e-5, steps=20)
+    H = opt.get_raw_hessian()
+    H[0, 0] = 1e30
+    H_after = opt.get_raw_hessian()
+    assert H_after[0, 0] != 1e30
+    # Also: the second copy should equal the first up to the mutation
+    H[0, 0] = H_after[0, 0]
+    assert np.allclose(H, H_after)
+
+
+def test_get_hessian_projection_options():
+    """project_tr=True removes T/R modes; project_tr=False removes none.
+
+    For a non-linear molecule we expect 6 near-zero eigvals (3 T + 3 R).
+    For a linear (e.g. diatomic) molecule one rotational mode is
+    degenerate so we expect 5.
+    """
+    # 3-atom non-collinear cluster: 6 zero eigvals expected
+    atoms = Atoms("Ar3", positions=[[0, 0, 0], [4.5, 0, 0], [2.0, 3.5, 0]])
+    atoms.calc = LennardJones(epsilon=0.0103, sigma=3.40)
+    opt = RSIRFO(atoms, hessian="identity", logfile=None)
+    opt.run(fmax=1e-5, steps=30)
+
+    H_proj = opt.get_hessian(project_tr=True)
+    H_no = opt.get_hessian(project_tr=False)
+    H_raw = opt.get_raw_hessian()
+
+    # project_tr=False must equal raw
+    assert np.allclose(H_no, H_raw)
+    # project_tr=True must produce 6 near-zero eigvals (3 T + 3 R) for a
+    # non-linear molecule
+    eigs = np.linalg.eigvalsh(H_proj)
+    n_zero = int(np.sum(np.abs(eigs) < 1e-6))
+    assert n_zero == 6, (
+        f"expected 6 near-zero eigvals after T/R projection, got {n_zero}"
+    )
+
+    # And without projection: no spurious zeros (eigval of T/R modes was 1
+    # because we used the identity Hessian, but level-shifting might lower it
+    # so we just check < 6)
+    eigs_no = np.linalg.eigvalsh(H_no)
+    n_zero_no = int(np.sum(np.abs(eigs_no) < 1e-6))
+    assert n_zero_no < 6
+
+
+def test_hessian_property_matches_get_hessian_proj():
+    """The backward-compatible .hessian property must equal
+    get_hessian(project_tr=True)."""
+    atoms = lj_ar2()
+    opt = RSIRFO(atoms, hessian="identity", logfile=None)
+    opt.run(fmax=1e-5, steps=20)
+    assert np.allclose(opt.hessian, opt.get_hessian(project_tr=True))
+
+
+def test_get_hessian_auto_skips_tr_when_fixed_atoms():
+    """project_tr=None must automatically skip T/R projection when there
+    are fixed atoms (T/R symmetry is broken by the constraint)."""
+    from ase.constraints import FixAtoms
+    atoms = Atoms("Ar3", positions=[[0, 0, 0], [4.5, 0, 0], [2.0, 3.5, 0]])
+    atoms.calc = LennardJones(epsilon=0.0103, sigma=3.40)
+    atoms.set_constraint(FixAtoms(indices=[0]))
+    opt = RSIRFO(atoms, hessian="identity", logfile=None)
+    opt.run(fmax=1e-5, steps=60)
+
+    # auto must == project_tr=False here
+    assert np.allclose(
+        opt.get_hessian(),
+        opt.get_hessian(project_tr=False),
+    )
+
+
+def test_get_hessian_apply_constraints_freezes_fixed_dofs():
+    """apply_constraints=True must replace fixed rows/cols with the
+    freeze-diagonal level shift."""
+    from ase.constraints import FixAtoms
+    atoms = Atoms("Ar3", positions=[[0, 0, 0], [4.5, 0, 0], [2.0, 3.5, 0]])
+    atoms.calc = LennardJones(epsilon=0.0103, sigma=3.40)
+    atoms.set_constraint(FixAtoms(indices=[0]))
+    opt = RSIRFO(atoms, hessian="identity", freeze_value=1e8, logfile=None)
+    opt.run(fmax=1e-5, steps=60)
+
+    H = opt.get_hessian(project_tr=False, apply_constraints=True)
+    # Atom 0 indices: 0, 1, 2 in flattened DOFs
+    # Diagonal entries on fixed DOFs should equal freeze_value
+    for i in range(3):
+        assert abs(H[i, i] - 1e8) < 1.0
+    # Off-diagonal entries on fixed rows / cols should be (near) zero
+    for i in range(3):
+        row_off = np.delete(H[i], i)
+        col_off = np.delete(H[:, i], i)
+        assert np.max(np.abs(row_off)) < 1e-6
+        assert np.max(np.abs(col_off)) < 1e-6
+

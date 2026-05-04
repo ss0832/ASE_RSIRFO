@@ -327,6 +327,48 @@ for full working demonstrations.
 
 ---
 
+## Reading the Hessian
+
+`RSIRFO` keeps two views of its internal Hessian:
+
+* The **raw** quasi-Newton Hessian — what the optimiser writes into during
+  `update()` calls. Contains all curvature including translation/rotation
+  modes and any DOFs that ASE constraints will subsequently filter.
+* The **projected** Hessian — what the RFO solver actually sees at step
+  time, with T/R modes removed and (optionally) constraint freezing
+  applied.
+
+After the run you can choose either with the public accessors:
+
+```python
+opt = RSIRFO(atoms, hessian="fischer")
+opt.run(fmax=0.05)
+
+H_raw = opt.get_raw_hessian()                        # bare matrix, no projection
+H_default = opt.get_hessian()                        # auto: T/R off if FixAtoms, on otherwise
+H_no_tr = opt.get_hessian(project_tr=False)          # explicit: skip T/R
+H_tr = opt.get_hessian(project_tr=True)              # explicit: project T/R
+H_full = opt.get_hessian(project_tr=True,
+                         apply_constraints=True)     # also freeze fixed DOFs
+
+# Backward-compatible shortcut (same as get_hessian(project_tr=True)):
+H_compat = opt.hessian
+```
+
+| Method | T/R projection | Constraint freeze | Returns a copy? |
+|--------|---------------|-------------------|-----------------|
+| `get_raw_hessian()` | no | no | yes |
+| `get_hessian(project_tr=None, apply_constraints=False)` (default) | auto (off if FixAtoms, on otherwise) | no | yes |
+| `get_hessian(project_tr=True/False, apply_constraints=...)` | explicit | optional | yes |
+| `.hessian` (property) | yes | no | yes |
+
+For a clean post-run frequency analysis, `get_hessian(project_tr=True)`
+is what you usually want; `get_raw_hessian()` is best when you need to
+serialise the matrix or pass it to a subsequent RSIRFO instance via
+`hessian=...`.
+
+---
+
 ## License
 
 Copyright (C) 2026 ss0832  
