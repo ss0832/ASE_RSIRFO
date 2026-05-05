@@ -146,11 +146,11 @@ from .rfo import restricted_step
 # Model Hessians live in a separate module that may be omitted at distribution
 # time without breaking the core optimiser. We import lazily inside helpers.
 try:
-    from .model_hessian import FischerD3ModelHessian, SwartD2ModelHessian
+    from .model_hessian import FischerModelHessian, SwartModelHessian
     _MODEL_HESSIAN_AVAILABLE = True
 except ImportError:  # pragma: no cover
-    FischerD3ModelHessian = None  # type: ignore[assignment]
-    SwartD2ModelHessian = None    # type: ignore[assignment]
+    FischerModelHessian = None  # type: ignore[assignment]
+    SwartModelHessian = None    # type: ignore[assignment]
     _MODEL_HESSIAN_AVAILABLE = False
 
 
@@ -269,12 +269,9 @@ class RSIRFO(Optimizer):
         first step.  Remember to also set ``hessian_recompute_interval``
         explicitly, because the auto-default is 0 (off) for ``ndarray``
         inputs.
-    fischer_functional
-        D3 functional preset for the Fischer-D3 model Hessian
-        (default ``'pbe0'``).
     swart_kwargs
         Additional keyword arguments forwarded to
-        :class:`~.model_hessian.SwartD2ModelHessian`.
+        :class:`~.model_hessian.SwartModelHessian`.
     hessian_update
         Quasi-Newton update method - any string in
         :pyattr:`HessianUpdater.METHODS` (default ``'auto'``).
@@ -365,7 +362,6 @@ class RSIRFO(Optimizer):
         order: int = 0,
         # ----- Hessian initialisation --------------------------------------
         hessian: str | np.ndarray = "identity",
-        fischer_functional: str = "pbe0",
         swart_kwargs: dict[str, Any] | None = None,
         # ----- Hessian updates ---------------------------------------------
         hessian_update: str | None = None,
@@ -512,7 +508,6 @@ class RSIRFO(Optimizer):
             dd_mu2=dd_mu2,
         )
         self._hessian_init_spec = hessian
-        self._fischer_functional = fischer_functional
         self._swart_kwargs = dict(swart_kwargs or {})
 
         # --- Hessian recomputation policy ---------------------------------
@@ -796,11 +791,9 @@ class RSIRFO(Optimizer):
         )
         elements = [str(s) for s in self.atoms.get_chemical_symbols()]
         if kind == "fischer":
-            generator = FischerD3ModelHessian(
-                d3_functional=self._fischer_functional
-            )
+            generator = FischerModelHessian()
         elif kind == "swart":
-            generator = SwartD2ModelHessian(**self._swart_kwargs)
+            generator = SwartModelHessian(**self._swart_kwargs)
         else:
             raise RuntimeError(
                 f"Initial Hessian {spec!r} is not a model Hessian; cannot "

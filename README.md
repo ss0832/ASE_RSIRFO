@@ -244,10 +244,11 @@ Full parameter reference: see the docstring of `RSIRFO.__init__`.
 
 ## Model Hessian note
 
-The Fischer and Swart model Hessians in `model_hessian.py` are
+The `'fischer'` and `'swart'` model Hessians in `model_hessian.py` are
 independent implementations based solely on the original publications
-(Fischer & Almlöf 1992; Swart & Bickelhaupt 2006). No code from any
-other package has been copied. See `NOTICE.md` for full references.
+(Fischer & Almlöf 1992; Swart & Bickelhaupt 2006). Both generators
+provide bonded-term empirical curvatures without any dispersion correction.
+See `NOTICE.md` for full references.
 
 ---
 
@@ -374,3 +375,4 @@ serialise the matrix or pass it to a subsequent RSIRFO instance via
 Copyright (C) 2026 ss0832  
 Licensed under the GNU General Public License, version 3 or later.  
 See `LICENSE` for the full text.
+

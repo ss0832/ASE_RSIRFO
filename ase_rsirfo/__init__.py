@@ -53,29 +53,27 @@ from .constraints import (
 )
 from .hessian_updaters import HessianUpdater
 from .optimizer import RSIRFO, numerical_hessian_from_forces
-from .parameters import D3Parameters
 
 # Model Hessians are an optional component (see NOTICE.md). The core
 # optimiser works without them, so we import lazily and silently degrade.
 try:
-    from .model_hessian import FischerD3ModelHessian, SwartD2ModelHessian
+    from .model_hessian import FischerModelHessian, SwartModelHessian
     _MODEL_HESSIAN_AVAILABLE = True
 except ImportError:  # pragma: no cover
-    FischerD3ModelHessian = None  # type: ignore[assignment]
-    SwartD2ModelHessian = None    # type: ignore[assignment]
+    FischerModelHessian = None  # type: ignore[assignment]
+    SwartModelHessian = None    # type: ignore[assignment]
     _MODEL_HESSIAN_AVAILABLE = False
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 __author__ = "ss0832"
 __license__ = "GPL-3.0-or-later"
 
 __all__ = [
     "RSIRFO",
     "HessianUpdater",
-    "D3Parameters",
     "numerical_hessian_from_forces",
-    "FischerD3ModelHessian",
-    "SwartD2ModelHessian",
+    "FischerModelHessian",
+    "SwartModelHessian",
     # Constraint helpers
     "detect_fixed_dofs",
     "apply_freeze_diagonal",

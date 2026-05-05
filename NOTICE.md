@@ -44,9 +44,6 @@ original work by the author of this package.
 | Data | Reference |
 |------|-----------|
 | Covalent radii | Pyykkö, Atsumi, *Chem. Eur. J.* **15**, 186 (2009) |
-| D2 C6 / vdW radii | Grimme, *J. Comput. Chem.* **27**, 1787 (2006) |
-| D3 BJ damping parameters | Grimme, Antony, Ehrlich, Krieg, *J. Chem. Phys.* **132**, 154104 (2010); Grimme, Ehrlich, Goerigk, *J. Comput. Chem.* **32**, 1456 (2011) |
-| D3 r4r2 reference values | Grimme D3 reference implementation (freely available) |
 | UFF vdW distances | Rappé, Casewit, Colwell, Goddard, Skiff, *J. Am. Chem. Soc.* **114**, 10024 (1992) |
 
 ## Dependencies

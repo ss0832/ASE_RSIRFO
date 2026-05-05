@@ -24,10 +24,10 @@ model_hessian.py
 Two empirical model Hessian generators that provide a chemistry-aware
 starting guess for geometry optimisation:
 
-* :class:`FischerD3ModelHessian` -- Fischer & Almlöf (1992) bonded-term model
-  augmented with a Grimme D3-BJ dispersion correction for non-bonded pairs.
-* :class:`SwartD2ModelHessian`   -- Swart & Bickelhaupt (2006) all-pairs model
-  with a Grimme D2 dispersion correction.
+* :class:`FischerModelHessian` -- Fischer & Almlöf (1992) bonded-term model
+  (stretch, bend, torsion).
+* :class:`SwartModelHessian`   -- Swart & Bickelhaupt (2006) all-pairs model
+  (exponential covalent + Gaussian VDW spring).
 
 Both generators return the **Cartesian** Hessian in atomic units
 (Hartree / Bohr^2) and **without** translation / rotation projection. The
@@ -37,11 +37,6 @@ References
 ----------
 * T. H. Fischer, J. Almlöf, *J. Phys. Chem.* **96**, 9768 (1992)
 * M. Swart, F. M. Bickelhaupt, *Int. J. Quantum Chem.* **106**, 2536 (2006)
-* S. Grimme, *J. Comput. Chem.* **27**, 1787 (2006) - D2 dispersion
-* S. Grimme, J. Antony, S. Ehrlich, H. Krieg,
-  *J. Chem. Phys.* **132**, 154104 (2010) - D3 dispersion
-* S. Grimme, S. Ehrlich, L. Goerigk, *J. Comput. Chem.* **32**, 1456 (2011) -
-  Becke-Johnson damping for D3
 * J. M. Anglada, J. M. Bofill, *Theor. Chem. Acc.* **100**, 336 (1998) -
   out-of-plane / off-diagonal handling for empirical Hessians.
 """
@@ -52,34 +47,27 @@ import numpy as np
 
 from .bond_connectivity import BondConnectivity
 from .internal_coords import (
-    bend, d3_pair_hessian, out_of_plane, stretch, torsion,
-    vdw_anisotropic, vdw_isotropic,
+    bend, out_of_plane, stretch, torsion,
 )
 from .parameters import (
-    D3Parameters,
     covalent_radius_bohr,
-    d2_c6_coefficient,
-    d2_vdw_radius_bohr,
     uff_vdw_distance_bohr,
 )
 
 
 # --------------------------------------------------------------------------- #
-#  Fischer-Almlöf + D3 dispersion
+#  Fischer-Almlöf model Hessian
 # --------------------------------------------------------------------------- #
 
 
-class FischerD3ModelHessian:
-    """Fischer & Almlöf (1992) model Hessian with D3-BJ dispersion correction.
+class FischerModelHessian:
+    """Fischer & Almlöf (1992) model Hessian (bonded terms only).
 
     Parameters
     ----------
     bond_factor
         Connectivity threshold ``r <= bond_factor * (r_cov_i + r_cov_j)``
         (default 1.3).
-    d3_functional
-        Functional name passed to :class:`~.parameters.D3Parameters`.
-        Default ``'pbe0'``.
 
     Notes
     -----
@@ -92,11 +80,8 @@ class FischerD3ModelHessian:
                   * exp(-2.85 * (r - r_cov))``
     """
 
-    def __init__(
-        self, bond_factor: float = 1.3, d3_functional: str = "pbe0"
-    ) -> None:
+    def __init__(self, bond_factor: float = 1.3) -> None:
         self.bond_factor = float(bond_factor)
-        self.d3_params = D3Parameters(d3_functional)
         self._connectivity = BondConnectivity(bond_factor=self.bond_factor)
 
     # ----- empirical force constants ----------------------------------------
@@ -210,45 +195,6 @@ class FischerD3ModelHessian:
                         Bvec[a_idx], Bvec[b_idx]
                     )
 
-    def _add_d3_dispersion(
-        self,
-        H: np.ndarray,
-        coord: np.ndarray,
-        elements: list[str],
-        bond_mat: np.ndarray,
-    ) -> None:
-        """D3-BJ dispersion second-derivative correction (non-bonded pairs)."""
-        n = coord.shape[0]
-        s6, s8, a1, a2 = (
-            self.d3_params.s6, self.d3_params.s8,
-            self.d3_params.a1, self.d3_params.a2,
-        )
-        # Pre-compute element-wise C8 components.
-        for i in range(n):
-            for j in range(i):
-                if bond_mat[i, j]:
-                    continue
-                r_vec = coord[i] - coord[j]
-                r_ij = float(np.linalg.norm(r_vec))
-                if r_ij < 0.1:
-                    continue
-                c6_ij = float(np.sqrt(
-                    d2_c6_coefficient(elements[i])
-                    * d2_c6_coefficient(elements[j])
-                ))
-                q_i = self.d3_params.get_r4r2(elements[i])
-                q_j = self.d3_params.get_r4r2(elements[j])
-                c8_ij = 3.0 * c6_ij * float(np.sqrt(q_i * q_j))
-                r0 = float(np.sqrt(q_i * q_j))
-                hess_block = d3_pair_hessian(
-                    r_vec, c6_ij, c8_ij, r0, s6, s8, a1, a2
-                )
-                si, sj = 3 * i, 3 * j
-                H[si:si + 3, si:si + 3] += hess_block
-                H[sj:sj + 3, sj:sj + 3] += hess_block
-                H[si:si + 3, sj:sj + 3] -= hess_block
-                H[sj:sj + 3, si:si + 3] -= hess_block
-
     # ----- public API --------------------------------------------------------
     def build(
         self, coord_bohr: np.ndarray, elements: list[str]
@@ -260,22 +206,20 @@ class FischerD3ModelHessian:
 
         bond_mat = self._connectivity.bond_connect_matrix(elements, coord)
         self._add_bonded(H, coord, elements, bond_mat)
-        self._add_d3_dispersion(H, coord, elements, bond_mat)
         return 0.5 * (H + H.T)
 
 
 # --------------------------------------------------------------------------- #
-#  Swart-Bickelhaupt + D2 dispersion
+#  Swart-Bickelhaupt model Hessian
 # --------------------------------------------------------------------------- #
 
 
-class SwartD2ModelHessian:
-    """Swart-Bickelhaupt (2006) all-pairs model Hessian with D2 dispersion.
+class SwartModelHessian:
+    """Swart-Bickelhaupt (2006) all-pairs model Hessian.
 
-    Compared to Fischer's model, Swart's variant treats every pair (bonded or
-    not) with an exponential covalent term plus a Gaussian VDW term, then
-    adds an explicit D2 second-derivative correction. Bend, torsion and
-    out-of-plane contributions follow Wilson's B-matrix formulation.
+    Every pair (bonded or not) is treated with an exponential covalent term
+    plus a Gaussian VDW spring. Bend, torsion and out-of-plane contributions
+    follow Wilson's B-matrix formulation.
 
     Parameters
     ----------
@@ -315,8 +259,8 @@ class SwartD2ModelHessian:
         """``exp(-alpha * (r_vdw - r)^2)``."""
         return float(np.exp(-alpha * (r_vdw - r) ** 2))
 
-    # ----- bond stretch + D2 dispersion (acts on every pair) ----------------
-    def _add_bond_and_dispersion(
+    # ----- bond stretch + VDW spring (acts on every pair) -------------------
+    def _add_bond_and_spring(
         self,
         H: np.ndarray,
         coord: np.ndarray,
@@ -344,31 +288,7 @@ class SwartD2ModelHessian:
                 # Spring rank-1 outer product r r^T / r^2.
                 outer = np.outer(rij, rij) / r2
                 spring_block = g * outer
-                # D2 dispersion correction.
-                c6 = float(np.sqrt(
-                    d2_c6_coefficient(elements[i])
-                    * d2_c6_coefficient(elements[j])
-                ))
-                rvdw_d2 = d2_vdw_radius_bohr(elements[i]) + d2_vdw_radius_bohr(
-                    elements[j]
-                )
-                vdw_block = np.empty((3, 3))
-                xs = (rij[0], rij[1], rij[2])
-                # diagonal terms: d^2 / dx_alpha^2
-                for a in range(3):
-                    others = (xs[(a + 1) % 3], xs[(a + 2) % 3])
-                    vdw_block[a, a] = vdw_isotropic(
-                        xs[a], others[0], others[1], c6, rvdw_d2
-                    )
-                # off-diagonal terms
-                for a in range(3):
-                    for b in range(a + 1, 3):
-                        c = 3 - a - b
-                        vdw_block[a, b] = vdw_anisotropic(
-                            xs[a], xs[b], xs[c], c6, rvdw_d2
-                        )
-                        vdw_block[b, a] = vdw_block[a, b]
-                block = spring_block - vdw_block
+                block = spring_block
 
                 si, sj = 3 * i, 3 * j
                 H[si:si + 3, si:si + 3] += block
@@ -557,7 +477,7 @@ class SwartD2ModelHessian:
         H = np.zeros((3 * n, 3 * n), dtype=float)
 
         bond_mat = self._connectivity.bond_connect_matrix(elements, coord)
-        self._add_bond_and_dispersion(H, coord, elements)
+        self._add_bond_and_spring(H, coord, elements)
         self._add_bends(H, coord, elements, bond_mat)
         self._add_torsions(H, coord, elements, bond_mat)
         self._add_out_of_plane(H, coord, elements, bond_mat)
