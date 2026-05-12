@@ -24,7 +24,7 @@ copied or adapted.
 | PSB update | Powell, *Math. Program.* **14**, 31 (1978) |
 | SR1/BFGS/PSB mix (Bofill) | Bofill, *J. Comput. Chem.* **15**, 1 (1994) |
 | FSB update | Schlegel, *Theor. Chem. Acc.* **103**, 294 (2000) |
-| CFD update variants | Csaszar, *J. Chem. Theory Comput.* **9**, 54 (2013) |
+| CFD update variants | Wu, Rahman, Wang, Louderaj, Hase, Zhuang, *J. Chem. Phys.* **133**, 074101 (2010); Zhuang, Siebert, Hase, Kay, Ceotto, *J. Chem. Theory Comput.* **9**, 54 (2013) |
 | Update flowchart selector | Bakó, Császár, *Theor. Chem. Acc.* **135**, 84 (2016) |
 | Powell damping | Nocedal, Wright (2006), eq. 18.15 |
 | Double damping | Bofill, Comajuan, *J. Comput. Chem.* **36**, 1557 (2015) |
@@ -33,6 +33,21 @@ copied or adapted.
 | Wilson B-vectors | Wilson, Decius, Cross, *Molecular Vibrations*, McGraw-Hill (1955) |
 | B-vector torsion formula | Bakken, Helgaker, *J. Chem. Phys.* **117**, 9160 (2002) |
 | T/R projection | Miller, Handy, Adams, *J. Chem. Phys.* **72**, 99 (1980) |
+
+## Software References and Implementation Cross-Checks
+
+The RFO secular-equation implementation was checked against the public
+``pysisyphus`` project for numerical behaviour. ``pysisyphus`` is distributed
+under GPL-3.0. No pysisyphus source files are vendored in this repository. The relevant software/paper
+reference is:
+
+| Software | Reference |
+|----------|-----------|
+| pysisyphus | Steinmetzer, Kupfer, Gräfe, *Int. J. Quantum Chem.* (2020), DOI: 10.1002/qua.26390; source license GPL-3.0 |
+
+Level-shift heuristics and some optimiser-structuring choices were also
+checked against the author's earlier MultiOptPy implementation. MultiOptPy
+is the same author's project; no third-party source files are vendored here.
 
 ## Atomic Data Tables
 

@@ -64,7 +64,7 @@ except ImportError:  # pragma: no cover
     SwartModelHessian = None    # type: ignore[assignment]
     _MODEL_HESSIAN_AVAILABLE = False
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 __author__ = "ss0832"
 __license__ = "GPL-3.0-or-later"
 

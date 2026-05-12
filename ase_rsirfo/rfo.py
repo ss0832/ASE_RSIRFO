@@ -58,9 +58,11 @@ than diagonalising the augmented Hessian explicitly. The classical
     f(lambda) = lambda + sum_i (g_i'^2) / (lambda_i' - lambda)
 where ``lambda_i' = eigenvalues_of_H / alpha`` and ``g_i'`` are the
 gradient components in the eigenbasis (also divided by ``alpha``).
-This implementation follows the ``pysisyphus`` reference very closely
-(https://github.com/eljost/pysisyphus, MIT-licensed; we ported the logic
-to a self-contained NumPy module under GPL-3.0+).
+The secular-equation route was cross-checked against the open-source
+``pysisyphus`` implementation (https://github.com/eljost/pysisyphus;
+GPL-3.0) and the published pysisyphus paper. No pysisyphus source files
+are vendored in this package; this file is a self-contained NumPy
+implementation distributed under the project license.
 """
 
 from __future__ import annotations

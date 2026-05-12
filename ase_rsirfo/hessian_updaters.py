@@ -50,8 +50,10 @@ Block (multi-secant) variants
   learning: forget the past, just sample", arXiv:2106.10989.
 
 CFD (compact finite difference) variants
-* T. Helgaker, J. Almlöf, P. Jørgensen, J. Olsen, *J. Chem. Phys.* **133**,
-  074101 (2010); P. Csaszar, *J. Chem. Theory Comput.* **9**, 54 (2013).
+* H. Wu, M. Rahman, J. Wang, U. Louderaj, W. L. Hase, Y. Zhuang,
+  *J. Chem. Phys.* **133**, 074101 (2010).
+* Y. Zhuang, M. R. Siebert, W. L. Hase, K. G. Kay, M. Ceotto,
+  *J. Chem. Theory Comput.* **9**, 54 (2013).
 
 Damping
 * Nocedal & Wright, eq. 18.15 (Powell damping); arXiv:2006.08877v3
